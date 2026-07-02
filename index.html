@@ -376,8 +376,8 @@ let syncUid=null, remoteRef=null, syncReady=false, applyingRemote=false, pushTim
 /* ============ Persistence ============ */
 function load(){
   try{ const s=JSON.parse(localStorage.getItem(LS_KEY)); if(s){ state={...state,...s}; } }catch(e){}
-  if(!state.tasks) state.tasks=[];
-  if(!state.projects) state.projects=[];
+  state.tasks=normalizeTasks(state.tasks);
+  state.projects=normalizeProjects(state.projects);
 }
 function persistLocal(){ localStorage.setItem(LS_KEY, JSON.stringify({
   tasks:state.tasks, projects:state.projects, theme:state.theme, view:state.view, sort:state.sort
@@ -418,6 +418,21 @@ function rangeLabel(due,end){ return (!end||end===due)?dateLabel(due):`${shortLa
 /* 기간 색상: 종료일 지나면 over, 시작했으면 today, 임박 soon */
 function rangeClass(due,end){ const ref=end||due; if(daysDiff(ref)<0) return "over"; if(daysDiff(due)<=0) return "today"; if(daysDiff(due)<=2) return "soon"; return ""; }
 function esc(s){ return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+/* Firebase는 빈 배열/객체를 저장 안 함 → 받은 데이터를 항상 정상화 */
+function asArray(x){ return Array.isArray(x) ? x : (x && typeof x==="object" ? Object.keys(x).map(k=>x[k]) : []); }
+function normalizeTask(t){
+  t=t||{};
+  return {
+    id: t.id||uid(), title: t.title||"", note: t.note||"", done: !!t.done,
+    prio: t.prio||4, due: t.due||null, end: t.end||null,
+    tags: asArray(t.tags), proj: t.proj||null,
+    subs: asArray(t.subs).map(s=>({ id:(s&&s.id)||uid(), t:(s&&s.t)||"", done:!!(s&&s.done) })),
+    repeat: t.repeat||null, created: t.created||Date.now(), order: t.order||0, completedAt: t.completedAt||null
+  };
+}
+function normalizeTasks(x){ return asArray(x).map(normalizeTask); }
+function normalizeProjects(x){ return asArray(x).map(p=>({ id:(p&&p.id)||uid(), name:(p&&p.name)||"프로젝트", color:(p&&p.color)||PROJ_COLORS[0] })); }
 
 /* natural language date words -> ISO */
 function wordToDate(w){
@@ -784,7 +799,7 @@ function exportJSON(){
 function importJSON(file){
   const r=new FileReader();
   r.onload=()=>{ try{ const d=JSON.parse(r.result);
-    if(Array.isArray(d.tasks)){ state.tasks=d.tasks; state.projects=d.projects||[]; save(); render(); toast("가져오기 완료"); }
+    if(Array.isArray(d.tasks)){ state.tasks=normalizeTasks(d.tasks); state.projects=normalizeProjects(d.projects); save(); render(); toast("가져오기 완료"); }
     else toast("올바른 형식이 아닙니다");
   }catch(e){ toast("가져오기 실패"); } };
   r.readAsText(file);
@@ -818,14 +833,14 @@ function startSync(u){
   remoteRef.once("value").then(snap=>{
     const r=snap.val();
     if(r && r.tasks){                 // 클라우드에 데이터 있음 → 그대로 채택
-      applyingRemote=true; state.tasks=r.tasks||[]; state.projects=r.projects||[]; persistLocal(); render(); applyingRemote=false;
+      applyingRemote=true; state.tasks=normalizeTasks(r.tasks); state.projects=normalizeProjects(r.projects); persistLocal(); render(); applyingRemote=false;
     }else{                            // 비어있음 → 현재 로컬을 올림
       remoteRef.set({tasks:state.tasks, projects:state.projects, ts:Date.now()}).catch(()=>{});
     }
     syncReady=true; setSyncBadge("on");
     remoteRef.on("value",s2=>{        // 실시간 반영
       const rr=s2.val(); if(!rr) return;
-      applyingRemote=true; state.tasks=rr.tasks||[]; state.projects=rr.projects||[]; persistLocal(); render(); applyingRemote=false;
+      applyingRemote=true; state.tasks=normalizeTasks(rr.tasks); state.projects=normalizeProjects(rr.projects); persistLocal(); render(); applyingRemote=false;
     });
   }).catch(()=>{ setSyncBadge("err"); toast("동기화 연결 실패 — 규칙/인증 설정 확인"); });
 }
