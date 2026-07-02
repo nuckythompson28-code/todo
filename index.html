@@ -12,6 +12,9 @@
 <link rel="manifest" href="manifest.json" />
 <link rel="icon" href="icon-192.png" />
 <link rel="apple-touch-icon" href="icon-180.png" />
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <style>
 :root{
   --bg:#f7f7f5; --panel:#ffffff; --panel-2:#fbfbfa; --sidebar:#faf9f7;
@@ -236,6 +239,7 @@ input,textarea,select{font-family:inherit;font-size:inherit;color:inherit}
     <div id="projList"></div>
 
     <div class="side-foot">
+      <button class="icon-btn" id="syncBtn" title="동기화 / 로그인">☁︎</button>
       <button class="icon-btn" id="themeBtn" title="테마 전환">🌙</button>
       <button class="icon-btn" id="statsBtn" title="통계">📊</button>
       <button class="icon-btn" id="exportBtn" title="내보내기(JSON)">⬇️</button>
@@ -318,6 +322,26 @@ input,textarea,select{font-family:inherit;font-size:inherit;color:inherit}
   </div>
 </div>
 
+<!-- Login / sync modal -->
+<div class="modal-bg" id="loginModal">
+  <div class="modal" style="width:340px">
+    <h3 id="loginTitle">☁️ 동기화 로그인</h3>
+    <p style="font-size:13px;color:var(--muted);margin:-4px 0 14px;line-height:1.5">로그인하면 폰·PC가 <b>같은 목록</b>으로 실시간 동기화됩니다. 처음이면 이메일·비밀번호로 <b>가입</b> 한 번만 하세요.</p>
+    <input id="loginEmail" type="email" placeholder="이메일" autocomplete="username" style="margin-bottom:9px" />
+    <input id="loginPw" type="password" placeholder="비밀번호 (6자 이상)" autocomplete="current-password" />
+    <div id="loginErr" style="color:var(--p1);font-size:12.5px;margin-top:9px;display:none"></div>
+    <div class="btns" style="margin-top:14px">
+      <button class="cancel" id="loginSkip">나중에</button>
+      <button class="cancel" id="signupBtn">가입</button>
+      <button class="ok" id="loginBtn">로그인</button>
+    </div>
+    <div id="loginAccount" style="display:none;font-size:13px;color:var(--muted);text-align:center">
+      <div style="margin-bottom:12px"><b id="acctEmail"></b> 로 동기화 중 ✅</div>
+      <button class="cancel" id="logoutBtn" style="padding:8px 16px;border-radius:8px">로그아웃</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"><span id="toastMsg"></span><button id="toastAction" style="display:none"></button></div>
 
 <script>
@@ -337,15 +361,33 @@ let state = {
 let draftDate=null, draftEnd=null, draftPrio=4, draftRepeat=null; // quick-add drafts
 let search="", editProjId=null, projColorSel=PROJ_COLORS[0], dragId=null;
 
+/* ============ Firebase sync ============ */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyCI4khVflKcAsb5mYBcavskKi5OJdbJIxs",
+  authDomain: "todo-e392e.firebaseapp.com",
+  databaseURL: "https://todo-e392e-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "todo-e392e",
+  storageBucket: "todo-e392e.firebasestorage.app",
+  messagingSenderId: "1046346038072",
+  appId: "1:1046346038072:web:0a16e6a12fbf7e8468dfcd"
+};
+let syncUid=null, remoteRef=null, syncReady=false, applyingRemote=false, pushTimer=null;
+
 /* ============ Persistence ============ */
 function load(){
   try{ const s=JSON.parse(localStorage.getItem(LS_KEY)); if(s){ state={...state,...s}; } }catch(e){}
   if(!state.tasks) state.tasks=[];
   if(!state.projects) state.projects=[];
 }
-function save(){ localStorage.setItem(LS_KEY, JSON.stringify({
+function persistLocal(){ localStorage.setItem(LS_KEY, JSON.stringify({
   tasks:state.tasks, projects:state.projects, theme:state.theme, view:state.view, sort:state.sort
 })); }
+function save(){ persistLocal(); if(syncReady && !applyingRemote) schedulePush(); }
+function schedulePush(){
+  if(!remoteRef) return;
+  clearTimeout(pushTimer);
+  pushTimer=setTimeout(()=>{ remoteRef.set({tasks:state.tasks, projects:state.projects, ts:Date.now()}).catch(()=>{}); }, 500);
+}
 
 /* ============ Utils ============ */
 const uid = () => Date.now().toString(36)+Math.random().toString(36).slice(2,7);
@@ -762,6 +804,71 @@ function toast(msg,actionLabel,cb){
   el.classList.add("show"); clearTimeout(toastT); toastT=setTimeout(()=>el.classList.remove("show"),4000);
 }
 
+/* ============ Firebase sync / auth ============ */
+function fbReady(){ return typeof firebase!=="undefined" && firebase.auth; }
+function setSyncBadge(kind){
+  const b=$("#syncBtn"); if(!b) return;
+  if(kind==="on"){ b.textContent="☁️"; b.title="동기화 중 (클릭: 계정)"; b.style.color="var(--green)"; }
+  else if(kind==="err"){ b.textContent="⚠️"; b.title="동기화 오류 (클릭: 재시도)"; b.style.color="var(--p1)"; }
+  else { b.textContent="☁︎"; b.title="동기화 로그인"; b.style.color=""; }
+}
+function startSync(u){
+  syncUid=u;
+  remoteRef=firebase.database().ref("users/"+syncUid+"/state");
+  remoteRef.once("value").then(snap=>{
+    const r=snap.val();
+    if(r && r.tasks){                 // 클라우드에 데이터 있음 → 그대로 채택
+      applyingRemote=true; state.tasks=r.tasks||[]; state.projects=r.projects||[]; persistLocal(); render(); applyingRemote=false;
+    }else{                            // 비어있음 → 현재 로컬을 올림
+      remoteRef.set({tasks:state.tasks, projects:state.projects, ts:Date.now()}).catch(()=>{});
+    }
+    syncReady=true; setSyncBadge("on");
+    remoteRef.on("value",s2=>{        // 실시간 반영
+      const rr=s2.val(); if(!rr) return;
+      applyingRemote=true; state.tasks=rr.tasks||[]; state.projects=rr.projects||[]; persistLocal(); render(); applyingRemote=false;
+    });
+  }).catch(()=>{ setSyncBadge("err"); toast("동기화 연결 실패 — 규칙/인증 설정 확인"); });
+}
+function stopSync(){ if(remoteRef){ try{remoteRef.off();}catch(e){} } remoteRef=null; syncUid=null; syncReady=false; setSyncBadge("off"); }
+function initFirebase(){
+  if(!fbReady()){ setSyncBadge("off"); return; }        // 오프라인/미로드 → 로컬 전용
+  try{ firebase.initializeApp(FIREBASE_CONFIG); }catch(e){}
+  firebase.auth().onAuthStateChanged(user=>{
+    if(user){ hideLogin(); $("#acctEmail").textContent=user.email; startSync(user.uid); }
+    else{ stopSync(); if(!localStorage.getItem("todo.sync.dismissed")) showLogin(); }
+  });
+}
+function showLogin(){
+  $("#loginErr").style.display="none";
+  const authed = fbReady() && firebase.auth().currentUser;
+  $("#loginAccount").style.display = authed?"block":"none";
+  document.querySelectorAll("#loginEmail,#loginPw").forEach(e=>e.style.display=authed?"none":"block");
+  document.querySelectorAll("#loginSkip,#signupBtn,#loginBtn").forEach(e=>e.style.display=authed?"none":"inline-block");
+  $("#loginTitle").textContent = authed?"☁️ 동기화 계정":"☁️ 동기화 로그인";
+  $("#loginModal").classList.add("show");
+}
+function hideLogin(){ $("#loginModal").classList.remove("show"); }
+function loginErr(msg){ const e=$("#loginErr"); e.textContent=msg; e.style.display="block"; }
+function fbErrMsg(e){
+  const c=(e&&e.code)||"";
+  if(c.indexOf("operation-not-allowed")>=0) return "이메일 로그인이 아직 안 켜졌습니다 (Authentication → 이메일/비밀번호 사용설정).";
+  if(c.indexOf("email-already-in-use")>=0) return "이미 가입된 이메일입니다. '로그인'을 누르세요.";
+  if(c.indexOf("invalid-email")>=0) return "이메일 형식이 올바르지 않습니다.";
+  if(c.indexOf("weak-password")>=0) return "비밀번호는 6자 이상이어야 합니다.";
+  if(c.indexOf("wrong-password")>=0||c.indexOf("invalid-credential")>=0) return "이메일 또는 비밀번호가 틀렸습니다.";
+  if(c.indexOf("user-not-found")>=0) return "가입되지 않은 이메일입니다. '가입'을 먼저 누르세요.";
+  return (e&&e.message)||"로그인 실패";
+}
+function doLogin(create){
+  if(!fbReady()){ loginErr("인터넷 연결 후 다시 시도하세요."); return; }
+  const em=$("#loginEmail").value.trim(), pw=$("#loginPw").value;
+  if(!em||!pw){ loginErr("이메일과 비밀번호를 입력하세요."); return; }
+  const auth=firebase.auth();
+  const p=create?auth.createUserWithEmailAndPassword(em,pw):auth.signInWithEmailAndPassword(em,pw);
+  p.then(()=>{ localStorage.removeItem("todo.sync.dismissed"); hideLogin(); toast(create?"가입 완료 — 동기화 시작":"로그인 완료 — 동기화 시작"); })
+   .catch(e=>loginErr(fbErrMsg(e)));
+}
+
 /* ============ Sidebar mobile ============ */
 function openSidebar(){ $("#sidebar").classList.add("open"); $("#scrim").classList.add("show"); }
 function closeSidebar(){ $("#sidebar").classList.remove("open"); $("#scrim").classList.remove("show"); }
@@ -799,6 +906,15 @@ function bind(){
 
   $("#menuBtn").onclick=openSidebar; $("#scrim").onclick=closeSidebar;
 
+  // sync / login
+  $("#syncBtn").onclick=()=>showLogin();
+  $("#loginBtn").onclick=()=>doLogin(false);
+  $("#signupBtn").onclick=()=>doLogin(true);
+  $("#loginSkip").onclick=()=>{ localStorage.setItem("todo.sync.dismissed","1"); hideLogin(); };
+  $("#logoutBtn").onclick=()=>{ if(fbReady()) firebase.auth().signOut(); hideLogin(); toast("로그아웃됨 — 이 기기 로컬만 사용"); };
+  $("#loginPw").addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(false); });
+  $("#loginModal").onclick=e=>{ if(e.target.id==="loginModal") hideLogin(); };
+
   // keyboard shortcuts
   document.addEventListener("keydown",e=>{
     const typing=/INPUT|TEXTAREA/.test(e.target.tagName)||e.target.isContentEditable;
@@ -822,7 +938,7 @@ function seed(){
 }
 
 /* ============ Init ============ */
-load(); seed(); applyTheme(); updateChips(); $("#sortSel").value=state.sort; bind(); render();
+load(); seed(); applyTheme(); updateChips(); $("#sortSel").value=state.sort; bind(); render(); initFirebase();
 
 /* PWA: 오프라인·홈화면 설치 (호스팅 시 활성화, file://에선 조용히 무시) */
 if("serviceWorker" in navigator && location.protocol.indexOf("http")===0){
