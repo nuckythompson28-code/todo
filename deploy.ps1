@@ -1,4 +1,4 @@
-# 할 일 Todo — GitHub Pages 재배포
+﻿# 할 일 Todo — GitHub Pages 재배포
 # G:\내 드라이브\work\todo 의 앱 파일을 이 repo로 복사 후 push → https://nuckythompson28-code.github.io/todo/
 $ErrorActionPreference = "Stop"
 $src = "G:\내 드라이브\work\todo"
@@ -13,3 +13,4 @@ $msg = "할 일 Todo 업데이트 " + (Get-Date -Format "yyyy-MM-dd HH:mm")
 git -c user.name="김한별" -c user.email="onestar@soltri.com" commit -m $msg
 git push
 Write-Host "`n배포 완료 → https://nuckythompson28-code.github.io/todo/  (반영까지 최대 1분)"
+
