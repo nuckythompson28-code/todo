@@ -1,5 +1,5 @@
 /* 할 일 Todo — service worker (offline cache) */
-const CACHE = "todo-v3";
+const CACHE = "todo-v4";
 const ASSETS = ["./", "index.html", "manifest.json", "icon-192.png", "icon-512.png", "icon-180.png"];
 
 self.addEventListener("install", e => {
